@@ -34,7 +34,6 @@ st.sidebar.markdown("---")
 st.sidebar.info("💡 专家提示：广东现货市场采用节点电价(LMP)，新能源需参与日前/实时市场，偏差考核极为严格。")
 
 # ================= 后端核心计算引擎 (蒙特卡洛模拟) =================
-@st.cache_data
 def simulate_market_and_risk(days=30, steps=24):
     np.random.seed(42)
     hours = days * steps
