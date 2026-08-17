@@ -5,8 +5,8 @@ import plotly.graph_objects as go
 
 # ================= 页面配置 =================
 st.set_page_config(page_title="广东园区光储充现货交易风险量化模型", layout="wide")
-st.title("⚡ 广东省园区综合能源现货交易风险量化与对冲模型 (专家版 v3)")
-st.caption("v3 更新：落实增量光伏余电上网“二选一”机制 ｜ 严格校准广东光伏1100利用小时 ｜ 支持零基装机测算")
+st.title("⚡ 广东省园区综合能源现货交易风险量化与对冲模型 (专家版 v3.1)")
+st.caption("v3.1 更新：落实增量光伏余电上网“二选一”机制 ｜ 严格校准广东光伏1100利用小时 ｜ 支持零基装机测算 ｜ 新增园区收益分成刚性成本双模式精准扣减")
 st.markdown("---")
 
 # ================= 侧边栏：参数输入 =================
@@ -41,6 +41,21 @@ st.sidebar.subheader("4. 年化校准与压力情景")
 annual_factor = st.sidebar.slider("年化折算系数 (雨季/台风季折减)", 0.60, 1.00, 0.80, 0.05)
 typhoon_pv_drop = st.sidebar.slider("台风周光伏出力骤降 (%)", 0, 90, 60, 5) / 100.0
 typhoon_price_drop = st.sidebar.slider("台风周现货电价骤降 (%)", 0, 90, 70, 5) / 100.0
+
+# 【新增】园区收益分成刚性成本
+st.sidebar.subheader("5. 园区收益分成刚性成本 (二选一)")
+share_mode = st.sidebar.radio(
+    "收益分成计算模式",
+    ["模式一：按年总用电量分成", "模式二：按定额折扣优惠"]
+)
+
+if share_mode == "模式一：按年总用电量分成":
+    share_vol = st.sidebar.number_input("年用电量 (万kWh, 封顶4000)", min_value=0, max_value=4000, value=2500, step=100)
+    share_price = st.sidebar.number_input("度电单价 (元/kWh, 封顶0.10)", min_value=0.00, max_value=0.10, value=0.06, step=0.01)
+    annual_share_cost = share_vol * share_price  # 单位：万元
+else:
+    share_fixed = st.sidebar.number_input("年折扣总金额 (万元, 封顶500)", min_value=0, max_value=500, value=150, step=10)
+    annual_share_cost = share_fixed  # 单位：万元
 
 st.sidebar.markdown("---")
 st.sidebar.info("💡 专家提示：广东现货市场采用节点电价(LMP)，务必关注『增量光伏项目上网电量的80%享受机制电价』的红利政策，有效对冲现货下行风险。")
@@ -115,30 +130,41 @@ df = simulate_market_and_risk()
 # ================= 财务与风险指标 =================
 total_rev = df['Mech_Rev'].sum() + df['Spot_Rev'].sum() + df['ESS_Rev'].sum()
 total_penalty = df['Penalty'].sum()
-net_rev = total_rev - total_penalty
 
-annual_net_rev = net_rev * (365 / 30) * annual_factor / 10000.0
+# 【新增】刚性成本单月/单周折算 (单位：元)
+monthly_share_cost_rmb = (annual_share_cost * 10000.0) / 12.0
+weekly_share_cost_rmb = (annual_share_cost * 10000.0) * (7.0 / 365.0)
+
+# 模拟期(30天)毛收益与净收益 (单位：元)
+sim_gross_rev = total_rev - total_penalty
+sim_net_rev = sim_gross_rev - monthly_share_cost_rmb
+
+# 年化毛收益与净收益 (单位：万元) - 注：年化折减仅针对发电/套利等变动收益，刚性成本全额扣除
+annual_gross_rev_10k = sim_gross_rev * (365 / 30) * annual_factor / 10000.0
+annual_net_rev_10k = annual_gross_rev_10k - annual_share_cost
+
 capex = (pv_cap * 280.0 + ess_cap * 70.0 + ev_cap * 0.07)
 
-# 【修复】防止0装机情况下的除零报错
+# 【修复】防止0装机情况下的除零报错，依据扣减刚性成本后的真实净利润进行回收期测算
 if capex == 0:
     static_payback_display = "无新增资产"
-elif annual_net_rev > 0:
-    static_payback_display = f"{(capex / annual_net_rev):.1f} 年"
+elif annual_net_rev_10k > 0:
+    static_payback_display = f"{(capex / annual_net_rev_10k):.1f} 年"
 else:
     static_payback_display = "超20年 (无法回本)"
 
-# 蒙特卡洛 P5 风险价值
+# 蒙特卡洛 P5 风险价值 (含刚性成本扣减)
 np.random.seed(7)
 mc_results = []
 for _ in range(2000):
     price_f = np.random.normal(1.0, 0.2)
     dev_f = np.abs(np.random.normal(1.0, 0.4))
-    sim = (total_rev * price_f) - (total_penalty * dev_f * penalty_multiplier)
-    mc_results.append(sim / 10000.0)
+    sim_gross = (total_rev * price_f) - (total_penalty * dev_f * penalty_multiplier)
+    sim_net = sim_gross - monthly_share_cost_rmb
+    mc_results.append(sim_net / 10000.0)
 mc_arr = np.array(mc_results)
 p5_value = np.percentile(mc_arr, 5)
-var95 = (net_rev / 10000.0) - p5_value
+var95 = (sim_net_rev / 10000.0) - p5_value
 
 # 台风周极端压力测试
 np.random.seed(99)
@@ -163,13 +189,14 @@ else:
     stress_revenue = 0.0
     stress_penalty = 0.0
 
-stress_net = stress_revenue - stress_penalty
-normal_week_net = net_rev / (30.0 / 7.0)
+# 台风周同样需要扣减周维度的刚性运营成本
+stress_net = stress_revenue - stress_penalty - weekly_share_cost_rmb
+normal_week_net = sim_net_rev / (30.0 / 7.0)
 stress_shrink_pct = ((normal_week_net - stress_net) / normal_week_net * 100.0) if normal_week_net > 0 else 0.0
 
 # ================= 前端可视化 =================
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("模拟期净收益", f"{net_rev/10000:.2f} 万元", f"年化约 {annual_net_rev:.1f} 万 (折减系数{annual_factor:.2f})")
+col1.metric("模拟期(单月)净收益", f"{sim_net_rev/10000:.2f} 万元", f"年化约 {annual_net_rev_10k:.1f} 万 (已扣除刚性成本)")
 col2.metric("静态回本期", static_payback_display, "含年化折减与偏差考核")
 col3.metric("偏差考核总罚款", f"{total_penalty/10000:.2f} 万元", "⚠️ 现货偏差风险", delta_color="inverse")
 col4.metric("P5风险价值 (VaR95)", f"{var95:.2f} 万元", f"P5净收益 {p5_value:.1f} 万", delta_color="inverse")
@@ -183,7 +210,7 @@ fig1.update_layout(height=400, xaxis_title="时间 (小时)", yaxis_title="电�
 st.plotly_chart(fig1, use_container_width=True)
 
 st.markdown("### 🌀 台风周极端压力测试 (广东气象特色)")
-st.caption("情景假设：日前按正常天气申报，台风周光伏出力与现货电价双骤降，超死区偏差按惩罚倍数考核。")
+st.caption("情景假设：日前按正常天气申报，台风周光伏出力与现货电价双骤降，超死区偏差按惩罚倍数考核（所有场景均已剥离折算后的园区刚性分成）。")
 scol1, scol2, scol3 = st.columns(3)
 scol1.metric("正常周均净收益", f"{normal_week_net/10000:.2f} 万元")
 scol2.metric("台风周净收益", f"{stress_net/10000:.2f} 万元", delta_color="inverse")
@@ -198,12 +225,13 @@ fig_s = go.Figure(go.Bar(
 fig_s.update_layout(height=350, yaxis_title="万元", template="plotly_white")
 st.plotly_chart(fig_s, use_container_width=True)
 
-st.markdown("### ⚖️ 收益构成与偏差罚款瀑布图")
+st.markdown("### ⚖️ 收益构成与扣款瀑布图")
 rev_components = {
     '光伏机制电价收益': df['Mech_Rev'].sum() if "机制电价" in feed_mode else 0,
     '光伏现货敞口收益': df['Spot_Rev'].sum(),
     '储能套利收益': df['ESS_Rev'].sum(),
-    '偏差考核罚款(扣除)': -df['Penalty'].sum()
+    '偏差考核罚款(扣除)': -df['Penalty'].sum(),
+    '园区收益分成(刚性扣除)': -monthly_share_cost_rmb
 }
 # 过滤掉为0的项保持图表整洁
 rev_components = {k: v for k, v in rev_components.items() if v != 0}
@@ -213,11 +241,11 @@ fig2 = go.Figure(go.Waterfall(
     x=list(rev_components.keys()), y=list(rev_components.values()),
     connector={"line": {"color": "rgb(63, 63, 63)"}},
 ))
-fig2.update_layout(title="模拟期现金流构成 (单位：元)", yaxis_title="金额", template="plotly_white")
+fig2.update_layout(title="模拟期(单月)现金流净构成 (单位：元)", yaxis_title="金额", template="plotly_white")
 st.plotly_chart(fig2, use_container_width=True)
 
 st.markdown("### 🌪️ 极端行情压力测试 (蒙特卡洛直方图)")
-st.caption("2000 次模拟下的净收益分布，橙色虚线为 P5 风险价值分位点。")
+st.caption("2000 次模拟下的净收益分布（含刚性成本扣除），橙色虚线为 P5 风险价值分位点。")
 fig3 = go.Figure(go.Histogram(x=mc_results, nbinsx=50, marker_color='#2563eb'))
 fig3.add_vline(x=0, line_dash="dash", line_color="red", annotation_text="亏损警戒线")
 fig3.add_vline(x=p5_value, line_dash="dot", line_color="orange", annotation_text="P5分位")
@@ -240,9 +268,10 @@ st.error(f"**风险警告**：模拟期偏差罚款 **{total_penalty/10000:.2f} 
 st.subheader("3. 法律边界与 EMC / 绿电购销合同合规要点")
 st.info("**⚖️ 综合能源项目法务风险管控清单**")
 st.markdown("""
-1. **台风/暴雨不可抗力免责条款**：台风等极端天气导致的出力骤降偏差，属于典型的《民法典》不可抗力事件。在并网协议与购售电合同中必须明确"极端气象"（如红色台风预警）的触发阈值，并依据广东电力市场规则及时申请免除“两个细则”的偏差考核。
-2. **偏差罚款责任传导**：管理商不得在合同中单方兜底现货偏差罚款。应明确约定因园区业主负荷设备突发故障导致的大幅用电偏差，其对应的辅助服务摊销或现货罚金由业主方承担。
-3. **VPP 聚合与独立储能合规**：如利用园区独立储能打包参与广东现货及辅助服务市场（需求响应），须事前取得业主排他性的调度授权，并厘清聚合商与南网调度机构在指令执行延误时的过错赔偿责任边界。
+1. **刚性成本与分层结算剥离**：本模型已剔除支付给园区的固定收益分成。实务中应在合同中明示该“固定收益分享额”的触发前提，避免在系统极端亏损且承受高额偏差罚款的情形下被强行抽血。
+2. **台风/暴雨不可抗力免责条款**：台风等极端天气导致的出力骤降偏差，属于典型的《民法典》不可抗力事件。在并网协议与购售电合同中必须明确"极端气象"（如红色台风预警）的触发阈值，并依据广东电力市场规则及时申请免除“两个细则”的偏差考核。
+3. **偏差罚款责任传导**：管理商不得在合同中单方兜底现货偏差罚款。应明确约定因园区业主负荷设备突发故障导致的大幅用电偏差，其对应的辅助服务摊销或现货罚金由业主方承担。
+4. **VPP 聚合与独立储能合规**：如利用园区独立储能打包参与广东现货及辅助服务市场（需求响应），须事前取得业主排他性的调度授权，并厘清聚合商与南网调度机构在指令执行延误时的过错赔偿责任边界。
 """)
 
 st.markdown("---")
