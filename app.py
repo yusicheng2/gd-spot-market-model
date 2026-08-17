@@ -4,9 +4,9 @@ import numpy as np
 import plotly.graph_objects as go
 
 # ================= 页面配置 =================
-st.set_page_config(page_title="广东园区光储充现货交易风险量化模型", layout="wide")
-st.title("⚡ 广东省园区综合能源现货交易风险量化与对冲模型 (专家版 v3.2)")
-st.caption("v3.2 更新：落实增量光伏余电上网“二选一”机制 ｜ 严格校准广东光伏1100利用小时 ｜ 新增全生命周期衰减率与各项刚性运维/前期成本")
+st.set_page_config(page_title="广东园区光储现货交易风险量化模型", layout="wide")
+st.title("⚡ 广东省园区综合能源现货交易风险量化与对冲模型 (专家版 v3.4)")
+st.caption("v3.4 核心调整：完全剥离充电桩业务 ｜ 专注光储资产现货交易风险量化 ｜ 完善刚性成本双模式精准扣减")
 st.markdown("---")
 
 # ================= 侧边栏：参数输入 =================
@@ -14,10 +14,9 @@ st.sidebar.header("📊 园区资产与交易参数设定")
 
 st.sidebar.subheader("1. 物理资产参数")
 pv_cap = st.sidebar.slider("光伏装机 (MW)", 0.0, 20.0, 6.0, 0.5)
-pv_hours = st.sidebar.number_input("光伏年等效利用小时 (h)", value=1100, step=50, help="广东地区典型值为1000-1100小时")
+pv_hours = st.sidebar.number_input("光伏年等效利用小时 (h)", value=1100, step=50, help="广东地区实际有效时长约1100小时")
 ess_cap = st.sidebar.slider("储能装机 (MWh)", 0.0, 50.0, 15.0, 1.0)
 ess_power = st.sidebar.slider("储能功率 (MW)", 0.0, 20.0, 5.0, 0.5)
-ev_cap = st.sidebar.slider("充电桩装机 (kW)", 0, 10000, 4000, 500)
 park_load = st.sidebar.slider("园区日均基础负荷 (MWh)", 10, 100, 45, 5)
 
 st.sidebar.subheader("2. 增量光伏余电上网价格模式 (二选一)")
@@ -36,7 +35,7 @@ penalty_multiplier = st.sidebar.slider("偏差惩罚倍数 (实时电价)", 1.0,
 deviation_threshold = st.sidebar.slider("免考核死区 (%)", 0.0, 10.0, 5.0, 0.5) / 100.0
 
 st.sidebar.subheader("4. 年化校准与压力情景")
-annual_factor = st.sidebar.slider("年化折算系数 (雨季/台风季折减)", 0.60, 1.00, 0.80, 0.05)
+annual_factor = st.sidebar.slider("年化折算系数 (仅限台风季光伏折减)", 0.60, 1.00, 0.80, 0.05)
 typhoon_pv_drop = st.sidebar.slider("台风周光伏出力骤降 (%)", 0, 90, 60, 5) / 100.0
 typhoon_price_drop = st.sidebar.slider("台风周现货电价骤降 (%)", 0, 90, 70, 5) / 100.0
 
@@ -54,7 +53,6 @@ else:
     share_fixed = st.sidebar.number_input("年折扣总金额 (万元, 封顶500)", min_value=0, max_value=500, value=150, step=10)
     annual_share_cost = share_fixed  # 单位：万元
 
-# 【新增】物理资产衰减率与刚性前期/运维成本
 st.sidebar.subheader("6. 衰减因子与刚性运营成本")
 pv_deg = st.sidebar.number_input("光伏组件年均衰减率 (%)", value=0.5, step=0.1)
 ess_deg = st.sidebar.number_input("储能电池年衰减率 (%)", value=2.0, step=0.1)
@@ -62,10 +60,10 @@ dev_fee = st.sidebar.number_input("园区路条/前期开发费 (万元)", value
 cont_fee = st.sidebar.number_input("不可预见费用 (万元)", value=50, step=10)
 land_rent = st.sidebar.number_input("场地租金 (万元/年)", value=10, step=1)
 pv_om = st.sidebar.number_input("光伏运维费 (万元/MW/年)", value=5, step=1)
-ess_ev_om = st.sidebar.number_input("储能与充电运维费 (万元/年)", value=20, step=1)
+ess_om = st.sidebar.number_input("储能运维费 (万元/年)", value=20, step=1)
 
 st.sidebar.markdown("---")
-st.sidebar.info("💡 专家提示：模型已内置完整的20年生命周期现金流推演，衰减因子与刚性支出将直接影响项目的真实动态回本期。")
+st.sidebar.info("💡 专家提示：储能核心算法已精准对齐现货市场套利量纲；并完全剥离了与光储核心交易无关的充电资产因素。")
 
 # ================= 后端核心计算引擎（蒙特卡洛模拟） =================
 def simulate_market_and_risk(days=30, steps=24):
@@ -112,17 +110,21 @@ def simulate_market_and_risk(days=30, steps=24):
     # 5. 储能套利
     ess_revenue = np.zeros(hours)
     if ess_cap > 0 and ess_power > 0:
-        soc = ess_cap * 0.5
+        soc = ess_cap * 0.5  # SOC 单位为 MWh
         for h in range(hours):
-            price = spot_prices[h]
+            price = spot_prices[h]  # price 单位为 元/kWh
             if price < (spot_mean - 0.5 * spot_sigma) and soc < ess_cap * 0.9:
-                charge = min(ess_power * 1000, (ess_cap * 0.9 - soc) / 0.85)
-                soc += charge * 0.85
-                ess_revenue[h] -= charge * price
+                # charge_mwh 为充入的兆瓦时
+                charge_mwh = min(ess_power, (ess_cap * 0.9 - soc) / 0.85)
+                soc += charge_mwh * 0.85
+                # 需乘以 1000 换算为 kWh 后再结算价格
+                ess_revenue[h] -= charge_mwh * 1000 * price
             elif price > (spot_mean + 0.5 * spot_sigma) and soc > ess_cap * 0.1:
-                discharge = min(ess_power * 1000, (soc - ess_cap * 0.1))
-                soc -= discharge / 0.85
-                ess_revenue[h] += discharge * price
+                # discharge_mwh 为释放的兆瓦时
+                discharge_mwh = min(ess_power, (soc - ess_cap * 0.1))
+                soc -= discharge_mwh / 0.85
+                # 需乘以 1000 换算为 kWh 后再结算价格
+                ess_revenue[h] += discharge_mwh * 1000 * price
 
     return pd.DataFrame({
         'Hour': t, 'Spot_Price': spot_prices,
@@ -138,7 +140,7 @@ total_rev = df['Mech_Rev'].sum() + df['Spot_Rev'].sum() + df['ESS_Rev'].sum()
 total_penalty = df['Penalty'].sum()
 
 # 各项刚性成本折算 (单位：元/万元)
-fixed_opex_annual = (pv_cap * pv_om) + ess_ev_om + land_rent  # 万元
+fixed_opex_annual = (pv_cap * pv_om) + ess_om + land_rent  # 万元
 monthly_share_cost_rmb = (annual_share_cost * 10000.0) / 12.0
 monthly_fixed_opex_rmb = (fixed_opex_annual * 10000.0) / 12.0
 weekly_share_cost_rmb = (annual_share_cost * 10000.0) * (7.0 / 365.0)
@@ -149,11 +151,11 @@ sim_gross_rev = total_rev - total_penalty
 sim_net_rev = sim_gross_rev - monthly_share_cost_rmb - monthly_fixed_opex_rmb
 
 # 总投资包含前期路条与不可预见费用
-capex = (pv_cap * 280.0 + ess_cap * 70.0 + ev_cap * 0.07) + dev_fee + cont_fee
+capex = (pv_cap * 280.0 + ess_cap * 70.0) + dev_fee + cont_fee
 
 # 20年全生命周期动态推演 (引入衰减与恒定刚性成本)
 pv_rev_1 = (df['Mech_Rev'].sum() + df['Spot_Rev'].sum()) * (365/30) * annual_factor / 10000.0
-ess_rev_1 = df['ESS_Rev'].sum() * (365/30) * annual_factor / 10000.0
+ess_rev_1 = df['ESS_Rev'].sum() * (365/30) / 10000.0
 penalty_1 = df['Penalty'].sum() * (365/30) * annual_factor / 10000.0
 
 cumulative_cash = 0.0
@@ -164,7 +166,7 @@ for y in range(1, 21):
     p_factor = (1 - pv_deg / 100.0)**(y - 1)
     e_factor = (1 - ess_deg / 100.0)**(y - 1)
 
-    # 当年毛利 (衰减后的光储收益 扣减 衰减后的预估罚款)
+    # 当年毛利 (考虑衰减)
     y_rev = (pv_rev_1 * p_factor) + (ess_rev_1 * e_factor) - (penalty_1 * p_factor)
     
     # 扣减每年固定的刚性支出
@@ -222,8 +224,11 @@ else:
     stress_revenue = 0.0
     stress_penalty = 0.0
 
+# 引入独立于台风影响的储能周收益
+stress_ess_rev = df['ESS_Rev'].sum() / (30.0 / 7.0)
+
 # 台风周同样需要扣减周维度的各项刚性运营成本
-stress_net = stress_revenue - stress_penalty - weekly_share_cost_rmb - weekly_fixed_opex_rmb
+stress_net = (stress_revenue + stress_ess_rev) - stress_penalty - weekly_share_cost_rmb - weekly_fixed_opex_rmb
 normal_week_net = sim_net_rev / (30.0 / 7.0)
 stress_shrink_pct = ((normal_week_net - stress_net) / normal_week_net * 100.0) if normal_week_net > 0 else 0.0
 
@@ -262,7 +267,7 @@ st.markdown("### ⚖️ 收益构成与扣款瀑布图")
 rev_components = {
     '光伏机制电价收益': df['Mech_Rev'].sum() if "机制电价" in feed_mode else 0,
     '光伏现货敞口收益': df['Spot_Rev'].sum(),
-    '储能套利收益': df['ESS_Rev'].sum(),
+    '储能现货套利收益': df['ESS_Rev'].sum(),
     '偏差考核罚款(扣除)': -df['Penalty'].sum(),
     '园区收益分成(扣除)': -monthly_share_cost_rmb,
     '固定运维与租金(扣除)': -monthly_fixed_opex_rmb
