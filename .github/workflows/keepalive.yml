@@ -1,0 +1,64 @@
+name: Keep Streamlit Apps Alive (Playwright)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Keep apps awake
+        run: |
+          python - << 'EOF'
+          import asyncio
+          from playwright.async_api import async_playwright
+
+          urls = [
+              "https://gd-spot-market-model.streamlit.app/"
+          ]
+
+          async def visit(url):
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch(headless=True)
+                  context = await browser.new_context(
+                      viewport={"width": 1280, "height": 720},
+                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                  )
+                  page = await context.new_page()
+
+                  try:
+                      print(f"访问 {url}")
+                      await page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+                      await page.wait_for_timeout(5000)
+
+                      button = page.get_by_role("button", name="Yes, get this app back up!")
+                      if await button.count() > 0:
+                          await button.click()
+                          print(f"✅ 已唤醒 {url}")
+                      else:
+                          print(f"✅ {url} 正常运行")
+                  except Exception as e:
+                      print(f"⚠️ {url} 处理异常: {e}")
+                  finally:
+                      await context.close()
+                      await browser.close()
+
+          asyncio.run(visit(urls))
+          EOF
