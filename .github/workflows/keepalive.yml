@@ -2,7 +2,8 @@ name: Keep Streamlit Apps Alive (Playwright)
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # 建议每 4 小时触发一次，保持应用活跃
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
@@ -28,37 +29,59 @@ jobs:
         run: |
           python - << 'EOF'
           import asyncio
+          import re
           from playwright.async_api import async_playwright
 
+          # 需要保活的 Streamlit 网址列表
           urls = [
-              "https://gd-spot-market-model-jyjm735k5rr4aztjy8chcf.streamlit.app/"
+              "https://gd-spot-maet-model-jyjm735k5rr4aztjy8chcf.streamlit.apprk"
           ]
 
           async def visit(url):
               async with async_playwright() as p:
-                  browser = await p.chromium.launch(headless=True)
+                  # 启动 Chromium 并规避自动化特征
+                  browser = await p.chromium.launch(
+                      headless=True,
+                      args=[
+                          "--no-sandbox",
+                          "--disable-setuid-sandbox",
+                          "--disable-blink-features=AutomationControlled"
+                      ]
+                  )
                   context = await browser.new_context(
-                      viewport={"width": 1280, "height": 720},
+                      viewport={"width": 1280, "height": 800},
                       user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
                   )
                   page = await context.new_page()
 
                   try:
-                      print(f"访问 {url}")
-                      await page.goto(url, wait_until="domcontentloaded", timeout=120_000)
-                      await page.wait_for_timeout(5000)
+                      print(f"正在访问: {url}")
+                      # Streamlit 包含长连接，使用 domcontentloaded 并配合显式等待更稳定
+                      await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+                      await page.wait_for_timeout(6000)
 
-                      button = page.get_by_role("button", name="Yes, get this app back up!")
-                      if await button.count() > 0:
-                          await button.click()
-                          print(f"✅ 已唤醒 {url}")
+                      # 模糊匹配唤醒按钮
+                      wake_button = page.get_by_role("button", name=re.compile(r"get this app back up", re.IGNORECASE))
+
+                      if await wake_button.count() > 0 and await wake_button.is_visible():
+                          print(f"检测到休眠状态，正在点击唤醒: {url}")
+                          await wake_button.click()
+                          # 点击后预留 25 秒让 Streamlit 容器完成启动初始化
+                          await page.wait_for_timeout(25000)
+                          print(f"✅ 唤醒请求已成功发送并等待完成: {url}")
                       else:
-                          print(f"✅ {url} 正常运行")
+                          print(f"✅ 应用当前处于活跃状态: {url}")
+
                   except Exception as e:
-                      print(f"⚠️ {url} 处理异常: {e}")
+                      print(f"⚠️ 处理异常 [{url}]: {e}")
                   finally:
                       await context.close()
                       await browser.close()
 
-          asyncio.run(visit(urls))
+          async def main():
+              for target_url in urls:
+                  await visit(target_url)
+
+          if __name__ == "__main__":
+              asyncio.run(main())
           EOF
